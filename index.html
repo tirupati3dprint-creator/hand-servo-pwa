@@ -7,30 +7,32 @@
   <link rel="manifest" href="manifest.json">
   <style>
     body { font-family: system-ui, sans-serif; margin: 12px; }
-    .row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
-    input { padding:8px; width:170px; }
-    button { padding:10px 16px; }
+    h2 { margin: 6px 0 10px; }
+    #status { margin: 8px 0 12px; min-height: 1.6em; }
+    .vals { display:flex; gap:10px; flex-wrap:wrap; font-size:18px; }
+    .chip { padding:6px 10px; border:1px solid #ddd; border-radius:10px; }
     video, canvas { width:100%; max-width:480px; border-radius:12px; }
-    #status { margin-top:8px; min-height:1.5em; }
+    button { padding:10px 16px; margin: 8px 0; }
   </style>
   <script>
-    if ('serviceWorker' in navigator) {
-      navigator.serviceWorker.register('./sw.js');
-    }
+    if ('serviceWorker' in navigator) navigator.serviceWorker.register('./sw.js');
   </script>
-  <!-- MediaPipe -->
-  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+  <!-- ✅ Use pinned versions -->
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1673/hands.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils@0.3.1640024915/camera_utils.js"></script>
 </head>
 <body>
-  <h2>Hand → Servo</h2>
-  <div class="row">
-    <input id="proto" value="https" />
-    <input id="ip" placeholder="ESP32 IP or host" value="esp32.local">
-    <input id="port" value="443">
-    <button id="startBtn">Start Camera</button>
+  <h2>Hand → Servo (PWA)</h2>
+  <div id="status">Ready. Tap Start and allow camera.</div>
+  <button id="startBtn">Start Camera</button>
+
+  <div class="vals">
+    <div class="chip">Thumb: <b id="v0">0</b></div>
+    <div class="chip">Index: <b id="v1">0</b></div>
+    <div class="chip">Middle: <b id="v2">0</b></div>
+    <div class="chip">Ring: <b id="v3">0</b></div>
+    <div class="chip">Little: <b id="v4">0</b></div>
   </div>
-  <div id="status">Ready.</div>
 
   <video id="video" playsinline muted></video>
   <canvas id="out" width="640" height="480"></canvas>
@@ -39,10 +41,8 @@
   const videoEl = document.getElementById('video');
   const canvasEl = document.getElementById('out');
   const ctx = canvasEl.getContext('2d');
-  const ipEl = document.getElementById('ip');
-  const portEl = document.getElementById('port');
-  const protoEl = document.getElementById('proto');
   const statusEl = document.getElementById('status');
+  const vEls = [0,1,2,3,4].map(i=>document.getElementById('v'+i));
 
   function vAngle(a,b,c){
     const v1=[a.x-b.x,a.y-b.y,a.z-b.z], v2=[c.x-b.x,c.y-b.y,c.z-b.z];
@@ -51,15 +51,7 @@
     const cos=Math.min(1,Math.max(-1,dot/((m1*m2)+1e-9)));
     return Math.acos(cos)*180/Math.PI;
   }
-
-  const ID={
-    WRIST:0,
-    THUMB_CMC:1, THUMB_MCP:2, THUMB_IP:3, THUMB_TIP:4,
-    INDEX_MCP:5, INDEX_PIP:6, INDEX_DIP:7, INDEX_TIP:8,
-    MIDDLE_MCP:9, MIDDLE_PIP:10, MIDDLE_DIP:11, MIDDLE_TIP:12,
-    RING_MCP:13, RING_PIP:14, RING_DIP:15, RING_TIP:16,
-    LITTLE_MCP:17, LITTLE_PIP:18, LITTLE_DIP:19, LITTLE_TIP:20
-  };
+  const ID={WRIST:0,THUMB_CMC:1,THUMB_MCP:2,THUMB_IP:3,THUMB_TIP:4,INDEX_MCP:5,INDEX_PIP:6,INDEX_DIP:7,INDEX_TIP:8,MIDDLE_MCP:9,MIDDLE_PIP:10,MIDDLE_DIP:11,MIDDLE_TIP:12,RING_MCP:13,RING_PIP:14,RING_DIP:15,RING_TIP:16,LITTLE_MCP:17,LITTLE_PIP:18,LITTLE_DIP:19,LITTLE_TIP:20};
 
   function fingerFlex(lm, tip, dip, pip, mcp){
     const a1=vAngle(lm[dip], lm[pip], lm[mcp]);   // PIP
@@ -68,57 +60,37 @@
     return Math.max(0, Math.min(100, flex));
   }
 
-  let posting=false, lastPost=0;
-
-  async function sendAngles(angles){
-    const now=performance.now();
-    if (posting || now-lastPost<40) return; // ~25Hz cap
-    posting=true; lastPost=now;
-    try{
-      const url = `${protoEl.value}://${ipEl.value}:${portEl.value}/angles`;
-      await fetch(url,{
-        method:'POST',
-        headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({angles})
-      });
-      statusEl.textContent = `Sent: ${angles.map(a=>a.toFixed(0)).join(', ')}`;
-    }catch(e){
-      statusEl.textContent = `Send failed: ${e}`;
-    }finally{
-      posting=false;
-    }
-  }
-
   function onResults(results){
-    ctx.save();
     ctx.clearRect(0,0,canvasEl.width,canvasEl.height);
-    ctx.drawImage(results.image, 0,0, canvasEl.width, canvasEl.height);
-    if (results.multiHandLandmarks && results.multiHandLandmarks.length){
+    ctx.drawImage(results.image,0,0,canvasEl.width,canvasEl.height);
+    if (results.multiHandLandmarks?.length){
       const lm = results.multiHandLandmarks[0];
-      const thumb  = fingerFlex(lm, ID.THUMB_TIP, ID.THUMB_IP, ID.THUMB_MCP, ID.THUMB_CMC);
-      const index  = fingerFlex(lm, ID.INDEX_TIP, ID.INDEX_DIP, ID.INDEX_PIP, ID.INDEX_MCP);
-      const middle = fingerFlex(lm, ID.MIDDLE_TIP,ID.MIDDLE_DIP,ID.MIDDLE_PIP,ID.MIDDLE_MCP);
-      const ring   = fingerFlex(lm, ID.RING_TIP,  ID.RING_DIP,  ID.RING_PIP,  ID.RING_MCP);
-      const little = fingerFlex(lm, ID.LITTLE_TIP,ID.LITTLE_DIP,ID.LITTLE_PIP,ID.LITTLE_MCP);
-      sendAngles([thumb,index,middle,ring,little]);
+      const vals = [
+        fingerFlex(lm, ID.THUMB_TIP, ID.THUMB_IP, ID.THUMB_MCP, ID.THUMB_CMC),
+        fingerFlex(lm, ID.INDEX_TIP, ID.INDEX_DIP, ID.INDEX_PIP, ID.INDEX_MCP),
+        fingerFlex(lm, ID.MIDDLE_TIP,ID.MIDDLE_DIP,ID.MIDDLE_PIP,ID.MIDDLE_MCP),
+        fingerFlex(lm, ID.RING_TIP,  ID.RING_DIP,  ID.RING_PIP,  ID.RING_MCP),
+        fingerFlex(lm, ID.LITTLE_TIP,ID.LITTLE_DIP,ID.LITTLE_PIP,ID.LITTLE_MCP),
+      ];
+      vals.forEach((v,i)=>vEls[i].textContent = v.toFixed(0));
     }
-    ctx.restore();
   }
 
-  document.getElementById('startBtn').onclick = async () => {
+  document.getElementById('startBtn').onclick = async ()=>{
     try{
-      const hands = new Hands.Hands({
-        locateFile: (f)=>`https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}`,
+      // ✅ Use correct constructor: new Hands(...)
+      const hands = new Hands({
+        locateFile: f=>`https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1673/${f}`
       });
       hands.setOptions({ maxNumHands:1, modelComplexity:1, minDetectionConfidence:0.6, minTrackingConfidence:0.6 });
       hands.onResults(onResults);
 
-      const camera = new CameraUtils.Camera(videoEl, {
-        onFrame: async () => { await hands.send({image: videoEl}); },
-        width: 640, height: 480
+      const cam = new CameraUtils.Camera(videoEl, {
+        onFrame: async ()=>{ await hands.send({image: videoEl}); },
+        width:640, height:480
       });
-      await camera.start();
-      statusEl.textContent='Camera started. Show your hand.';
+      await cam.start();
+      statusEl.textContent = 'Camera started. Show your hand.';
     }catch(err){
       statusEl.textContent = 'Camera failed: ' + err;
     }
