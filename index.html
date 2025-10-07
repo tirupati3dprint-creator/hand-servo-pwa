@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Hand → Servo (PWA)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="manifest" href="manifest.json">
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 12px; }
+    .row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+    input { padding:8px; width:170px; }
+    button { padding:10px 16px; }
+    video, canvas { width:100%; max-width:480px; border-radius:12px; }
+    #status { margin-top:8px; min-height:1.5em; }
+  </style>
+  <script>
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.register('./sw.js');
+    }
+  </script>
+  <!-- MediaPipe -->
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+</head>
+<body>
+  <h2>Hand → Servo</h2>
+  <div class="row">
+    <input id="proto" value="https" />
+    <input id="ip" placeholder="ESP32 IP or host" value="esp32.local">
+    <input id="port" value="443">
+    <button id="startBtn">Start Camera</button>
+  </div>
+  <div id="status">Ready.</div>
+
+  <video id="video" playsinline muted></video>
+  <canvas id="out" width="640" height="480"></canvas>
+
+<script>
+  const videoEl = document.getElementById('video');
+  const canvasEl = document.getElementById('out');
+  const ctx = canvasEl.getContext('2d');
+  const ipEl = document.getElementById('ip');
+  const portEl = document.getElementById('port');
+  const protoEl = document.getElementById('proto');
+  const statusEl = document.getElementById('status');
+
+  function vAngle(a,b,c){
+    const v1=[a.x-b.x,a.y-b.y,a.z-b.z], v2=[c.x-b.x,c.y-b.y,c.z-b.z];
+    const dot=v1[0]*v2[0]+v1[1]*v2[1]+v1[2]*v2[2];
+    const m1=Math.hypot(...v1), m2=Math.hypot(...v2);
+    const cos=Math.min(1,Math.max(-1,dot/((m1*m2)+1e-9)));
+    return Math.acos(cos)*180/Math.PI;
+  }
+
+  const ID={
+    WRIST:0,
+    THUMB_CMC:1, THUMB_MCP:2, THUMB_IP:3, THUMB_TIP:4,
+    INDEX_MCP:5, INDEX_PIP:6, INDEX_DIP:7, INDEX_TIP:8,
+    MIDDLE_MCP:9, MIDDLE_PIP:10, MIDDLE_DIP:11, MIDDLE_TIP:12,
+    RING_MCP:13, RING_PIP:14, RING_DIP:15, RING_TIP:16,
+    LITTLE_MCP:17, LITTLE_PIP:18, LITTLE_DIP:19, LITTLE_TIP:20
+  };
+
+  function fingerFlex(lm, tip, dip, pip, mcp){
+    const a1=vAngle(lm[dip], lm[pip], lm[mcp]);   // PIP
+    const a2=vAngle(lm[pip], lm[mcp], lm[0]);     // MCP vs wrist
+    let flex=(a1-20)+(a2-20);
+    return Math.max(0, Math.min(100, flex));
+  }
+
+  let posting=false, lastPost=0;
+
+  async function sendAngles(angles){
+    const now=performance.now();
+    if (posting || now-lastPost<40) return; // ~25Hz cap
+    posting=true; lastPost=now;
+    try{
+      const url = `${protoEl.value}://${ipEl.value}:${portEl.value}/angles`;
+      await fetch(url,{
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({angles})
+      });
+      statusEl.textContent = `Sent: ${angles.map(a=>a.toFixed(0)).join(', ')}`;
+    }catch(e){
+      statusEl.textContent = `Send failed: ${e}`;
+    }finally{
+      posting=false;
+    }
+  }
+
+  function onResults(results){
+    ctx.save();
+    ctx.clearRect(0,0,canvasEl.width,canvasEl.height);
+    ctx.drawImage(results.image, 0,0, canvasEl.width, canvasEl.height);
+    if (results.multiHandLandmarks && results.multiHandLandmarks.length){
+      const lm = results.multiHandLandmarks[0];
+      const thumb  = fingerFlex(lm, ID.THUMB_TIP, ID.THUMB_IP, ID.THUMB_MCP, ID.THUMB_CMC);
+      const index  = fingerFlex(lm, ID.INDEX_TIP, ID.INDEX_DIP, ID.INDEX_PIP, ID.INDEX_MCP);
+      const middle = fingerFlex(lm, ID.MIDDLE_TIP,ID.MIDDLE_DIP,ID.MIDDLE_PIP,ID.MIDDLE_MCP);
+      const ring   = fingerFlex(lm, ID.RING_TIP,  ID.RING_DIP,  ID.RING_PIP,  ID.RING_MCP);
+      const little = fingerFlex(lm, ID.LITTLE_TIP,ID.LITTLE_DIP,ID.LITTLE_PIP,ID.LITTLE_MCP);
+      sendAngles([thumb,index,middle,ring,little]);
+    }
+    ctx.restore();
+  }
+
+  document.getElementById('startBtn').onclick = async () => {
+    try{
+      const hands = new Hands.Hands({
+        locateFile: (f)=>`https://cdn.jsdelivr.net/npm/@mediapipe/hands/${f}`,
+      });
+      hands.setOptions({ maxNumHands:1, modelComplexity:1, minDetectionConfidence:0.6, minTrackingConfidence:0.6 });
+      hands.onResults(onResults);
+
+      const camera = new CameraUtils.Camera(videoEl, {
+        onFrame: async () => { await hands.send({image: videoEl}); },
+        width: 640, height: 480
+      });
+      await camera.start();
+      statusEl.textContent='Camera started. Show your hand.';
+    }catch(err){
+      statusEl.textContent = 'Camera failed: ' + err;
+    }
+  };
+</script>
+</body>
+</html>
